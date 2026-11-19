@@ -1,0 +1,13 @@
+{
+  "name": "family-quiz",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --outfile=static/app.js",
+    "watch": "esbuild src/main.ts --bundle --outfile=static/app.js --watch",
+    "typecheck": "tsc --noEmit --strict --target es2020 --lib es2020,dom src/main.ts"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}
