@@ -23,6 +23,9 @@
   var me = isHost ? null : loadIdentity();
   var view = "none";
   var sent = /* @__PURE__ */ new Map();
+  var total = 0;
+  var locked = /* @__PURE__ */ new Set();
+  var selected = 1;
   var ws;
   var timer;
   var send = (obj) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(obj));
@@ -51,20 +54,20 @@
         saveIdentity(me);
         sent.clear();
         Object.entries(msg.answers).forEach(([p, a]) => sent.set(p, a));
-        if (view === "player") renderSent();
-        else renderPlayer();
+        applyConfig(msg.total, msg.locked);
+        if (view !== "player") renderPlayer();
         break;
-      case "submitted": {
-        sent.set(msg.puzzle, msg.answer);
-        renderSent();
-        const n = Number(msg.puzzle);
-        $("puzzle").value = Number.isNaN(n) ? msg.puzzle : String(n + 1);
-        const text = $("text");
-        text.value = "";
-        text.focus();
-        $("status").textContent = `Sent answer for puzzle ${msg.puzzle}.`;
+      case "config":
+        applyConfig(msg.total, msg.locked);
         break;
-      }
+      case "submitted":
+        sent.set(String(msg.puzzle), msg.answer);
+        renderChips();
+        setStatus(`Saved your answer for question ${msg.puzzle}.`);
+        break;
+      case "rejected":
+        setStatus(msg.message, true);
+        break;
       case "error":
         me = null;
         saveIdentity(null);
@@ -89,21 +92,24 @@
   }
   function renderPlayer() {
     view = "player";
-    const next = Math.max(0, ...[...sent.keys()].map(Number).filter((n) => !Number.isNaN(n))) + 1;
+    selected = 1;
     app.innerHTML = `
     <h1>Hi, ${esc(me.name)}</h1>
-    <p>Work it out on paper, then send your answer here.</p>
+    <p>Work it out on paper, then pick a question and send your answer.</p>
+    <div id="chips" class="qchips"></div>
     <form id="answer">
-      <label>Puzzle number <input id="puzzle" inputmode="numeric" value="${next}" required></label>
-      <label>Your answer <input id="text" autocomplete="off" required></label>
-      <button>Send answer</button>
-      <div class="ok" id="status" role="status"></div>
+      <label><span id="qlabel"></span><input id="text" autocomplete="off" required></label>
+      <button id="send">Send answer</button>
+      <div id="status" role="status"></div>
     </form>
-    <div id="sentbox"></div>
     <p><button id="leave" class="quiet" type="button">Not you? Switch player</button></p>`;
+    $("chips").onclick = (e) => {
+      const b = e.target.closest("button[data-n]");
+      if (b) select(Number(b.dataset.n));
+    };
     $("answer").onsubmit = (e) => {
       e.preventDefault();
-      send({ type: "submit", puzzle: $("puzzle").value, answer: $("text").value });
+      send({ type: "submit", puzzle: selected, answer: $("text").value });
     };
     $("leave").onclick = () => {
       if (!confirm("Leave the quiz as this player?")) return;
@@ -113,25 +119,81 @@
       sent.clear();
       renderJoin();
     };
-    renderSent();
-    $("text").focus();
+    select(1);
   }
-  function renderSent() {
-    const items = [...sent].sort((a, b) => Number(a[0]) - Number(b[0]));
-    $("sentbox").innerHTML = items.length ? `<h2>Sent so far</h2><ul>${items.map(([p, a]) => `<li>Puzzle ${esc(p)}: ${esc(a)}</li>`).join("")}</ul>` : "";
+  function select(n) {
+    selected = n;
+    $("text").value = sent.get(String(n)) ?? "";
+    renderChips();
+    updateForm();
+    if (!locked.has(n)) $("text").focus();
+  }
+  function applyConfig(t, l) {
+    total = t;
+    locked = new Set(l);
+    if (view !== "player") return;
+    if (selected > total) return select(total);
+    renderChips();
+    updateForm();
+  }
+  function renderChips() {
+    let html = "";
+    for (let n = 1; n <= total; n++) {
+      const isLocked = locked.has(n);
+      const cls = ["q", n === selected ? "sel" : "", sent.has(String(n)) ? "done" : "", isLocked ? "lock" : ""].join(" ");
+      const state = isLocked ? "locked" : sent.has(String(n)) ? "answered" : "open";
+      html += `<button type="button" class="${cls}" data-n="${n}" aria-pressed="${n === selected}" aria-label="Question ${n}, ${state}">${n}${isLocked ? " \u{1F512}" : sent.has(String(n)) ? " \u2713" : ""}</button>`;
+    }
+    $("chips").innerHTML = html;
+  }
+  var LOCK_NOTE = "This question is locked by the host.";
+  function updateForm() {
+    const isLocked = locked.has(selected);
+    $("qlabel").textContent = `Question ${selected}`;
+    $("text").disabled = isLocked;
+    $("send").disabled = isLocked;
+    if (isLocked) setStatus(LOCK_NOTE, true);
+    else if ($("status").textContent === LOCK_NOTE) setStatus("");
+  }
+  function setStatus(text, isError = false) {
+    const el = $("status");
+    el.textContent = text;
+    el.className = isError ? "err" : "ok";
   }
   function renderHost(s) {
-    const puzzles = Object.keys(s.submissions).sort((a, b) => Number(a) - Number(b));
     const online = s.players.filter((p) => p.online).length;
+    const lockedSet = new Set(s.locked);
+    let questions = "";
+    for (let n = 1; n <= s.total; n++) {
+      const answers = Object.entries(s.submissions[String(n)] ?? {});
+      questions += `<div class="puzzle">
+      <div class="qhead"><strong>Question ${n}${lockedSet.has(n) ? " \u{1F512}" : ""} <span class="muted">(${answers.length} answer${answers.length === 1 ? "" : "s"})</span></strong>
+        <button class="quiet" data-lock="${n}" data-to="${!lockedSet.has(n)}">${lockedSet.has(n) ? "Unlock" : "Lock"}</button></div>
+      <ul>${answers.map(([name, a]) => `<li>${esc(name)}: ${esc(a)}</li>`).join("")}</ul></div>`;
+    }
     app.innerHTML = `
     <h1>Host</h1>
     <img class="qr" src="/qr.svg" alt="QR code to join the quiz">
     <p class="url">${esc(s.url)}</p>
     <h2>Players (${online} online of ${s.players.length})</h2>
     <ul class="chips">${s.players.map((p) => `<li class="${p.online ? "" : "off"}">${esc(p.name)}${p.online ? "" : " (offline)"}</li>`).join("") || "<li class='muted'>Waiting for players\u2026</li>"}</ul>
-    <h2>Answers</h2>
-    ${puzzles.map((p) => `<div class="puzzle"><strong>Puzzle ${esc(p)}</strong><ul>${Object.entries(s.submissions[p]).map(([n, a]) => `<li>${esc(n)}: ${esc(a)}</li>`).join("")}</ul></div>`).join("") || "<p>No answers yet.</p>"}
+    <h2>Questions</h2>
+    <div class="stepper">
+      <button class="quiet" id="dec" aria-label="Fewer questions" ${s.total <= 1 ? "disabled" : ""}>\u2212</button>
+      <strong>${s.total} questions</strong>
+      <button class="quiet" id="inc" aria-label="More questions" ${s.total >= 50 ? "disabled" : ""}>+</button>
+      <button class="quiet" id="lockall">Lock all</button>
+      <button class="quiet" id="unlockall">Unlock all</button>
+    </div>
+    ${questions}
     <p><button id="clear" class="quiet">Clear all answers</button></p>`;
+    $("dec").onclick = () => send({ type: "set_total", total: s.total - 1 });
+    $("inc").onclick = () => send({ type: "set_total", total: s.total + 1 });
+    $("lockall").onclick = () => send({ type: "lock_all", locked: true });
+    $("unlockall").onclick = () => send({ type: "lock_all", locked: false });
+    app.querySelectorAll("button[data-lock]").forEach((b) => {
+      b.onclick = () => send({ type: "set_lock", puzzle: Number(b.dataset.lock), locked: b.dataset.to === "true" });
+    });
     $("clear").onclick = () => confirm("Clear all answers?") && send({ type: "clear" });
   }
   if (!isHost) me ? app.innerHTML = "<p>Reconnecting\u2026</p>" : renderJoin();

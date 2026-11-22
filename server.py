@@ -34,6 +34,7 @@ JOIN_URL = f"http://{lan_ip()}:{PORT}/"
 players: dict[str, dict] = {}
 submissions: dict[str, dict[str, str]] = {}  # puzzle -> {name: answer}
 hosts: set[WebSocket] = set()
+config = {"total": 10, "locked": set()}  # host-controlled: question count + locked questions
 
 
 def snapshot() -> dict:
@@ -45,7 +46,24 @@ def snapshot() -> dict:
             key=lambda p: p["name"].lower(),
         ),
         "submissions": submissions,
+        "total": config["total"],
+        "locked": sorted(config["locked"]),
     }
+
+
+def config_msg() -> dict:
+    return {"type": "config", "total": config["total"], "locked": sorted(config["locked"])}
+
+
+async def push_config() -> None:
+    """Tell the host screen and every connected player about a config change."""
+    await push_to_hosts()
+    for p in list(players.values()):
+        if p["ws"] is not None:
+            try:
+                await p["ws"].send_json(config_msg())
+            except Exception:
+                pass
 
 
 async def push_to_hosts() -> None:
@@ -124,16 +142,32 @@ async def ws_endpoint(ws: WebSocket):
                 name = players[token]["name"]
                 mine = {pz: by[name] for pz, by in submissions.items() if name in by}
                 await ws.send_json(
-                    {"type": "joined", "name": name, "token": token, "answers": mine}
+                    {
+                        "type": "joined",
+                        "name": name,
+                        "token": token,
+                        "answers": mine,
+                        "total": config["total"],
+                        "locked": sorted(config["locked"]),
+                    }
                 )
                 await push_to_hosts()
 
             elif kind == "submit" and token in players:
                 name = players[token]["name"]
-                puzzle = str(msg.get("puzzle", "")).strip()[:10]
+                try:
+                    puzzle = int(msg.get("puzzle"))
+                except (TypeError, ValueError):
+                    puzzle = 0
                 answer = str(msg.get("answer", "")).strip()[:200]
-                if puzzle and answer:
-                    submissions.setdefault(puzzle, {})[name] = answer
+                if not 1 <= puzzle <= config["total"]:
+                    await ws.send_json({"type": "rejected", "message": "That question doesn't exist."})
+                elif puzzle in config["locked"]:
+                    await ws.send_json(
+                        {"type": "rejected", "message": f"Question {puzzle} is locked."}
+                    )
+                elif answer:
+                    submissions.setdefault(str(puzzle), {})[name] = answer
                     await ws.send_json(
                         {"type": "submitted", "puzzle": puzzle, "answer": answer}
                     )
@@ -143,6 +177,30 @@ async def ws_endpoint(ws: WebSocket):
                 del players[token]
                 token = None
                 await push_to_hosts()
+
+            elif kind == "set_total" and is_host:
+                try:
+                    config["total"] = max(1, min(50, int(msg.get("total"))))
+                    await push_config()
+                except (TypeError, ValueError):
+                    pass
+
+            elif kind == "set_lock" and is_host:
+                try:
+                    n = int(msg.get("puzzle"))
+                except (TypeError, ValueError):
+                    continue
+                if msg.get("locked"):
+                    config["locked"].add(n)
+                else:
+                    config["locked"].discard(n)
+                await push_config()
+
+            elif kind == "lock_all" and is_host:
+                config["locked"] = (
+                    set(range(1, config["total"] + 1)) if msg.get("locked") else set()
+                )
+                await push_config()
 
             elif kind == "clear" and is_host:
                 submissions.clear()

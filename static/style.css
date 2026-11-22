@@ -30,3 +30,12 @@ ul { padding-left: 1.1em; margin: .3em 0; }
 #net { position: sticky; top: 0; background: var(--err); color: #fff; text-align: center; padding: 6px; font-size: .9rem; }
 #net[hidden] { display: none; }
 .chips li.off { color: var(--muted); border-style: dashed; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.qchips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+button.q { background: transparent; color: var(--ink); border-color: var(--line); padding: 8px 12px; min-width: 48px; }
+button.q.done { border-color: var(--accent); }
+button.q.lock { opacity: .6; }
+button.q.sel { background: var(--accent); color: var(--bg); border-color: var(--accent); opacity: 1; }
+.stepper { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.qhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.qhead button { padding: 6px 12px; }
