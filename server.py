@@ -32,28 +32,10 @@ JOIN_URL = f"http://{lan_ip()}:{PORT}/"
 # --- game state (in memory; restarting the server resets everything) ---
 # token -> {"name": str, "ws": live socket or None while the player is offline}
 players: dict[str, dict] = {}
-submissions: dict[str, dict[str, str]] = {}  # puzzle -> {name: answer}
+submissions: dict[str, dict[str, str]] = {}  # question -> {name: answer}
 hosts: set[WebSocket] = set()
-config = {"total": 10, "locked": set(), "texts": {}}  # host-controlled: count, locks, question text
-
-
-def texts() -> dict:
-    return {str(k): v for k, v in config["texts"].items()}
-
-
-def snapshot() -> dict:
-    return {
-        "type": "state",
-        "url": JOIN_URL,
-        "players": sorted(
-            ({"name": p["name"], "online": p["ws"] is not None} for p in players.values()),
-            key=lambda p: p["name"].lower(),
-        ),
-        "submissions": submissions,
-        "total": config["total"],
-        "locked": sorted(config["locked"]),
-        "texts": texts(),
-    }
+# Host-controlled. questions: n -> {"text": str, "kind": "text" | "choice", "options": [str]}
+config: dict = {"total": 10, "locked": set(), "questions": {}}
 
 
 def config_msg() -> dict:
@@ -61,8 +43,29 @@ def config_msg() -> dict:
         "type": "config",
         "total": config["total"],
         "locked": sorted(config["locked"]),
-        "texts": texts(),
+        "questions": {str(k): v for k, v in config["questions"].items()},
     }
+
+
+def snapshot() -> dict:
+    return {
+        **config_msg(),
+        "type": "state",
+        "url": JOIN_URL,
+        "players": sorted(
+            ({"name": p["name"], "online": p["ws"] is not None} for p in players.values()),
+            key=lambda p: p["name"].lower(),
+        ),
+        "submissions": submissions,
+    }
+
+
+async def push_to_hosts() -> None:
+    for h in list(hosts):
+        try:
+            await h.send_json(snapshot())
+        except Exception:
+            hosts.discard(h)
 
 
 async def push_config() -> None:
@@ -76,12 +79,20 @@ async def push_config() -> None:
                 pass
 
 
-async def push_to_hosts() -> None:
-    for h in list(hosts):
-        try:
-            await h.send_json(snapshot())
-        except Exception:
-            hosts.discard(h)
+def clean_question(msg: dict) -> dict | None:
+    """Validate a host-edited question. Returns None to mean 'empty, remove it'."""
+    text = str(msg.get("text", "")).strip()[:1000]
+    raw = msg.get("options") if isinstance(msg.get("options"), list) else []
+    options: list[str] = []
+    for o in raw:
+        o = str(o).strip()[:100]
+        if o and o not in options:
+            options.append(o)
+    options = options[:6]
+    kind = "choice" if msg.get("kind") == "choice" and len(options) >= 2 else "text"
+    if kind == "text" and not text:
+        return None
+    return {"text": text, "kind": kind, "options": options if kind == "choice" else []}
 
 
 @asynccontextmanager
@@ -150,38 +161,29 @@ async def ws_endpoint(ws: WebSocket):
                 token = given
                 players[token]["ws"] = ws  # (re)attach this connection
                 name = players[token]["name"]
-                mine = {pz: by[name] for pz, by in submissions.items() if name in by}
+                mine = {q: by[name] for q, by in submissions.items() if name in by}
                 await ws.send_json(
-                    {
-                        "type": "joined",
-                        "name": name,
-                        "token": token,
-                        "answers": mine,
-                        "total": config["total"],
-                        "locked": sorted(config["locked"]),
-                        "texts": texts(),
-                    }
+                    {**config_msg(), "type": "joined", "name": name, "token": token, "answers": mine}
                 )
                 await push_to_hosts()
 
             elif kind == "submit" and token in players:
                 name = players[token]["name"]
                 try:
-                    puzzle = int(msg.get("puzzle"))
+                    q = int(msg.get("puzzle"))
                 except (TypeError, ValueError):
-                    puzzle = 0
+                    q = 0
                 answer = str(msg.get("answer", "")).strip()[:200]
-                if not 1 <= puzzle <= config["total"]:
+                question = config["questions"].get(q)
+                if not 1 <= q <= config["total"]:
                     await ws.send_json({"type": "rejected", "message": "That question doesn't exist."})
-                elif puzzle in config["locked"]:
-                    await ws.send_json(
-                        {"type": "rejected", "message": f"Question {puzzle} is locked."}
-                    )
+                elif q in config["locked"]:
+                    await ws.send_json({"type": "rejected", "message": f"Question {q} is locked."})
+                elif question and question["kind"] == "choice" and answer not in question["options"]:
+                    await ws.send_json({"type": "rejected", "message": "Pick one of the options."})
                 elif answer:
-                    submissions.setdefault(str(puzzle), {})[name] = answer
-                    await ws.send_json(
-                        {"type": "submitted", "puzzle": puzzle, "answer": answer}
-                    )
+                    submissions.setdefault(str(q), {})[name] = answer
+                    await ws.send_json({"type": "submitted", "puzzle": q, "answer": answer})
                     await push_to_hosts()
 
             elif kind == "leave" and token in players:
@@ -207,22 +209,22 @@ async def ws_endpoint(ws: WebSocket):
                     config["locked"].discard(n)
                 await push_config()
 
-            elif kind == "set_text" and is_host:
-                try:
-                    n = int(msg.get("puzzle"))
-                except (TypeError, ValueError):
-                    continue
-                text = str(msg.get("text", "")).strip()[:1000]
-                if text:
-                    config["texts"][n] = text
-                else:
-                    config["texts"].pop(n, None)
-                await push_config()
-
             elif kind == "lock_all" and is_host:
                 config["locked"] = (
                     set(range(1, config["total"] + 1)) if msg.get("locked") else set()
                 )
+                await push_config()
+
+            elif kind == "set_question" and is_host:
+                try:
+                    n = int(msg.get("puzzle"))
+                except (TypeError, ValueError):
+                    continue
+                cleaned = clean_question(msg)
+                if cleaned:
+                    config["questions"][n] = cleaned
+                else:
+                    config["questions"].pop(n, None)
                 await push_config()
 
             elif kind == "clear" and is_host:

@@ -1,5 +1,6 @@
 (() => {
   // src/main.ts
+  var EMPTY = { text: "", kind: "text", options: [] };
   var app = document.getElementById("app");
   var net = document.getElementById("net");
   var isHost = location.pathname.startsWith("/host");
@@ -25,9 +26,9 @@
   var sent = /* @__PURE__ */ new Map();
   var total = 0;
   var locked = /* @__PURE__ */ new Set();
+  var questions = {};
   var selected = 1;
-  var texts = {};
-  var savedTexts = {};
+  var fieldKey = "";
   var ws;
   var timer;
   var send = (obj) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(obj));
@@ -56,11 +57,11 @@
         saveIdentity(me);
         sent.clear();
         Object.entries(msg.answers).forEach(([p, a]) => sent.set(p, a));
-        applyConfig(msg.total, msg.locked, msg.texts);
+        applyConfig(msg);
         if (view !== "player") renderPlayer();
         break;
       case "config":
-        applyConfig(msg.total, msg.locked, msg.texts);
+        applyConfig(msg);
         break;
       case "submitted":
         sent.set(String(msg.puzzle), msg.answer);
@@ -94,14 +95,14 @@
   }
   function renderPlayer() {
     view = "player";
-    selected = 1;
     app.innerHTML = `
     <h1>Hi, ${esc(me.name)}</h1>
     <p>Work it out on paper, then pick a question and send your answer.</p>
     <div id="chips" class="qchips"></div>
     <div id="qtext" class="qtext" hidden></div>
     <form id="answer">
-      <label><span id="qlabel"></span><input id="text" autocomplete="off" required></label>
+      <div id="qlabel" class="qlabel"></div>
+      <div id="field"></div>
       <button id="send">Send answer</button>
       <div id="status" role="status"></div>
     </form>
@@ -112,7 +113,16 @@
     };
     $("answer").onsubmit = (e) => {
       e.preventDefault();
-      send({ type: "submit", puzzle: selected, answer: $("text").value });
+      const q = currentQ();
+      let answer;
+      if (q.kind === "choice") {
+        const picked = document.querySelector('input[name="choice"]:checked');
+        if (!picked) return setStatus("Pick an option first.", true);
+        answer = q.options[Number(picked.value)];
+      } else {
+        answer = $("text").value;
+      }
+      send({ type: "submit", puzzle: selected, answer });
     };
     $("leave").onclick = () => {
       if (!confirm("Leave the quiz as this player?")) return;
@@ -122,19 +132,22 @@
       sent.clear();
       renderJoin();
     };
+    selected = 1;
     select(1);
   }
+  var currentQ = () => questions[String(selected)] ?? EMPTY;
   function select(n) {
     selected = n;
-    $("text").value = sent.get(String(n)) ?? "";
+    fieldKey = "";
     renderChips();
     updateForm();
-    if (!locked.has(n)) $("text").focus();
+    const input = document.getElementById("text");
+    if (input && !locked.has(n)) input.focus();
   }
-  function applyConfig(t, l, tx) {
-    total = t;
-    locked = new Set(l);
-    texts = tx;
+  function applyConfig(c) {
+    total = c.total;
+    locked = new Set(c.locked);
+    questions = c.questions;
     if (view !== "player") return;
     if (selected > total) return select(total);
     renderChips();
@@ -152,12 +165,19 @@
   }
   var LOCK_NOTE = "This question is locked by the host.";
   function updateForm() {
+    const q = currentQ();
     const isLocked = locked.has(selected);
     $("qlabel").textContent = `Question ${selected}`;
     const qt = $("qtext");
-    qt.textContent = texts[String(selected)] ?? "";
-    qt.hidden = !qt.textContent;
-    $("text").disabled = isLocked;
+    qt.textContent = q.text;
+    qt.hidden = !q.text;
+    const key = `${selected}|${q.kind}|${q.options.join("")}`;
+    if (key !== fieldKey) {
+      fieldKey = key;
+      const mine = sent.get(String(selected)) ?? "";
+      $("field").innerHTML = q.kind === "choice" ? `<div class="opts-list" role="radiogroup" aria-label="Question ${selected} options">${q.options.map((o, i) => `<label class="opt"><input type="radio" name="choice" value="${i}" ${o === mine ? "checked" : ""}> <span>${esc(o)}</span></label>`).join("")}</div>` : `<label class="sr">Your answer <input id="text" autocomplete="off" required value="${esc(mine)}"></label>`;
+    }
+    $("field").querySelectorAll("input").forEach((i) => i.disabled = isLocked);
     $("send").disabled = isLocked;
     if (isLocked) setStatus(LOCK_NOTE, true);
     else if ($("status").textContent === LOCK_NOTE) setStatus("");
@@ -167,64 +187,149 @@
     el.textContent = text;
     el.className = isError ? "err" : "ok";
   }
+  var hostBuilt = false;
+  var hostTab = "answers";
+  var panelTab = "";
+  var lastState;
+  var justSaved = /* @__PURE__ */ new Set();
   function renderHost(s) {
-    const drafts = /* @__PURE__ */ new Map();
-    app.querySelectorAll("textarea[data-q]").forEach((t) => {
-      if (t.value !== (savedTexts[t.dataset.q] ?? "")) drafts.set(t.dataset.q, t.value);
-    });
-    const active = document.activeElement;
-    const focusQ = active?.dataset?.q;
-    const selStart = active?.selectionStart ?? 0;
-    const selEnd = active?.selectionEnd ?? 0;
-    savedTexts = s.texts;
+    lastState = s;
+    if (!hostBuilt) buildHostShell(s);
     const online = s.players.filter((p) => p.online).length;
-    const lockedSet = new Set(s.locked);
-    let questions = "";
-    for (let n = 1; n <= s.total; n++) {
-      const answers = Object.entries(s.submissions[String(n)] ?? {});
-      questions += `<div class="puzzle">
-      <div class="qhead"><strong>Question ${n}${lockedSet.has(n) ? " \u{1F512}" : ""} <span class="muted">(${answers.length} answer${answers.length === 1 ? "" : "s"})</span></strong>
-        <button class="quiet" data-lock="${n}" data-to="${!lockedSet.has(n)}">${lockedSet.has(n) ? "Unlock" : "Lock"}</button></div>
-      <textarea data-q="${n}" rows="2" aria-label="Text for question ${n}" placeholder="Question text players will see (optional)">${esc(s.texts[String(n)] ?? "")}</textarea>
-      <button class="quiet" data-save="${n}">Save text</button>
-      <ul>${answers.map(([name, a]) => `<li>${esc(name)}: ${esc(a)}</li>`).join("")}</ul></div>`;
-    }
+    $("playersTitle").textContent = `Players (${online} online of ${s.players.length})`;
+    $("players").innerHTML = s.players.map((p) => `<li class="${p.online ? "" : "off"}">${esc(p.name)}${p.online ? "" : " (offline)"}</li>`).join("") || "<li class='muted'>Waiting for players\u2026</li>";
+    renderPanel(s);
+  }
+  function buildHostShell(s) {
+    hostBuilt = true;
     app.innerHTML = `
     <h1>Host</h1>
     <img class="qr" src="/qr.svg" alt="QR code to join the quiz">
     <p class="url">${esc(s.url)}</p>
-    <h2>Players (${online} online of ${s.players.length})</h2>
-    <ul class="chips">${s.players.map((p) => `<li class="${p.online ? "" : "off"}">${esc(p.name)}${p.online ? "" : " (offline)"}</li>`).join("") || "<li class='muted'>Waiting for players\u2026</li>"}</ul>
-    <h2>Questions</h2>
-    <div class="stepper">
-      <button class="quiet" id="dec" aria-label="Fewer questions" ${s.total <= 1 ? "disabled" : ""}>\u2212</button>
-      <strong>${s.total} questions</strong>
-      <button class="quiet" id="inc" aria-label="More questions" ${s.total >= 50 ? "disabled" : ""}>+</button>
-      <button class="quiet" id="lockall">Lock all</button>
-      <button class="quiet" id="unlockall">Unlock all</button>
+    <h2 id="playersTitle"></h2>
+    <ul class="chips" id="players"></ul>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="answers">Answers</button>
+      <button role="tab" data-tab="edit">Edit questions</button>
     </div>
-    ${questions}
-    <p><button id="clear" class="quiet">Clear all answers</button></p>`;
-    $("dec").onclick = () => send({ type: "set_total", total: s.total - 1 });
-    $("inc").onclick = () => send({ type: "set_total", total: s.total + 1 });
-    $("lockall").onclick = () => send({ type: "lock_all", locked: true });
-    $("unlockall").onclick = () => send({ type: "lock_all", locked: false });
-    app.querySelectorAll("button[data-lock]").forEach((b) => {
-      b.onclick = () => send({ type: "set_lock", puzzle: Number(b.dataset.lock), locked: b.dataset.to === "true" });
-    });
-    app.querySelectorAll("button[data-save]").forEach((b) => {
+    <div id="panel" role="tabpanel"></div>`;
+    app.querySelectorAll("button[data-tab]").forEach((b) => {
       b.onclick = () => {
-        const q = b.dataset.save;
-        const t = app.querySelector(`textarea[data-q="${q}"]`);
-        send({ type: "set_text", puzzle: Number(q), text: t.value });
+        hostTab = b.dataset.tab;
+        if (lastState) renderPanel(lastState);
       };
     });
+  }
+  function renderPanel(s) {
+    app.querySelectorAll("button[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === hostTab)));
+    if (panelTab !== hostTab) {
+      panelTab = hostTab;
+      if (hostTab === "edit") buildEditScaffold();
+    }
+    hostTab === "answers" ? renderAnswers(s) : renderEdit(s);
+  }
+  function renderAnswers(s) {
+    const lockedSet = new Set(s.locked);
+    let html = `<div class="stepper">
+    <button class="quiet" id="lockall">Lock all</button>
+    <button class="quiet" id="unlockall">Unlock all</button></div>`;
+    for (let n = 1; n <= s.total; n++) {
+      const q = s.questions[String(n)] ?? EMPTY;
+      const answers = Object.entries(s.submissions[String(n)] ?? {});
+      const tally = q.kind === "choice" ? `<ul class="chips">${q.options.map((o) => `<li>${esc(o)} (${answers.filter(([, a]) => a === o).length})</li>`).join("")}</ul>` : "";
+      html += `<div class="puzzle">
+      <div class="qhead"><strong>Question ${n}${lockedSet.has(n) ? " \u{1F512}" : ""} <span class="muted">(${answers.length} answer${answers.length === 1 ? "" : "s"})</span></strong>
+        <button class="quiet" data-lock="${n}" data-to="${!lockedSet.has(n)}">${lockedSet.has(n) ? "Unlock" : "Lock"}</button></div>
+      ${q.text ? `<p class="qsmall">${esc(q.text)}</p>` : ""}${tally}
+      <ul>${answers.map(([name, a]) => `<li>${esc(name)}: ${esc(a)}</li>`).join("")}</ul></div>`;
+    }
+    html += `<p><button id="clear" class="quiet">Clear all answers</button></p>`;
+    $("panel").innerHTML = html;
+    $("lockall").onclick = () => send({ type: "lock_all", locked: true });
+    $("unlockall").onclick = () => send({ type: "lock_all", locked: false });
+    $("panel").querySelectorAll("button[data-lock]").forEach((b) => {
+      b.onclick = () => send({ type: "set_lock", puzzle: Number(b.dataset.lock), locked: b.dataset.to === "true" });
+    });
     $("clear").onclick = () => confirm("Clear all answers?") && send({ type: "clear" });
-    drafts.forEach((v, q) => app.querySelector(`textarea[data-q="${q}"]`).value = v);
-    if (focusQ) {
-      const t = app.querySelector(`textarea[data-q="${focusQ}"]`);
-      t?.focus();
-      t?.setSelectionRange(selStart, selEnd);
+  }
+  var optRow = (v) => `<div class="optrow"><input data-f="opt" maxlength="100" aria-label="Option" placeholder="Option" value="${esc(v)}"><button type="button" class="quiet" data-act="rm" aria-label="Remove option">\xD7</button></div>`;
+  function cardHtml(n, q) {
+    const rows = [...q.options];
+    while (rows.length < 2) rows.push("");
+    const saved = justSaved.delete(n) ? "Saved \u2713" : "";
+    return `<strong>Question ${n}</strong>
+    <textarea data-f="text" rows="2" aria-label="Text for question ${n}" placeholder="Question text players will see (optional)">${esc(q.text)}</textarea>
+    <label>Answer type
+      <select data-f="kind">
+        <option value="text" ${q.kind === "text" ? "selected" : ""}>Short answer</option>
+        <option value="choice" ${q.kind === "choice" ? "selected" : ""}>Multiple choice</option>
+      </select></label>
+    <div class="opts" ${q.kind === "choice" ? "" : "hidden"}>
+      <div data-opts>${rows.map(optRow).join("")}</div>
+      <button type="button" class="quiet" data-act="add">Add option</button>
+    </div>
+    <div><button type="button" data-act="save">Save</button> <span class="ok" data-status>${saved}</span></div>`;
+  }
+  function buildEditScaffold() {
+    $("panel").innerHTML = `<div class="stepper" id="stepper"></div><div id="cards"></div>`;
+    const cards = $("cards");
+    cards.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const card = btn.closest(".card");
+      const opts = card.querySelector("[data-opts]");
+      if (btn.dataset.act === "add" && opts.children.length < 6) opts.insertAdjacentHTML("beforeend", optRow(""));
+      else if (btn.dataset.act === "rm") btn.closest(".optrow").remove();
+      else if (btn.dataset.act === "save") saveCard(card);
+    });
+    cards.addEventListener("change", (e) => {
+      const sel = e.target;
+      if (sel.dataset.f !== "kind") return;
+      const card = sel.closest(".card");
+      card.querySelector(".opts").hidden = sel.value !== "choice";
+      const opts = card.querySelector("[data-opts]");
+      while (opts.children.length < 2) opts.insertAdjacentHTML("beforeend", optRow(""));
+    });
+  }
+  function saveCard(card) {
+    const n = Number(card.dataset.card);
+    const status = card.querySelector("[data-status]");
+    const text = card.querySelector('[data-f="text"]').value;
+    const kind = card.querySelector('[data-f="kind"]').value;
+    const options = Array.from(card.querySelectorAll('[data-f="opt"]')).map((i) => i.value.trim()).filter(Boolean);
+    if (kind === "choice" && new Set(options).size < 2) {
+      status.className = "err";
+      status.textContent = "Add at least two different options.";
+      return;
+    }
+    justSaved.add(n);
+    status.className = "ok";
+    status.textContent = "Saved \u2713";
+    send({ type: "set_question", puzzle: n, text, kind, options });
+  }
+  function renderEdit(s) {
+    $("stepper").innerHTML = `
+    <button class="quiet" id="dec" aria-label="Fewer questions" ${s.total <= 1 ? "disabled" : ""}>\u2212</button>
+    <strong>${s.total} questions</strong>
+    <button class="quiet" id="inc" aria-label="More questions" ${s.total >= 50 ? "disabled" : ""}>+</button>`;
+    $("dec").onclick = () => send({ type: "set_total", total: s.total - 1 });
+    $("inc").onclick = () => send({ type: "set_total", total: s.total + 1 });
+    const cards = $("cards");
+    Array.from(cards.children).forEach((el) => Number(el.dataset.card) > s.total && el.remove());
+    for (let n = 1; n <= s.total; n++) {
+      const q = s.questions[String(n)] ?? EMPTY;
+      const key = JSON.stringify(q);
+      let el = cards.querySelector(`[data-card="${n}"]`);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "card";
+        el.dataset.card = String(n);
+        cards.appendChild(el);
+      }
+      if (el.dataset.key !== key) {
+        el.dataset.key = key;
+        el.innerHTML = cardHtml(n, q);
+      }
     }
   }
   if (!isHost) me ? app.innerHTML = "<p>Reconnecting\u2026</p>" : renderJoin();
