@@ -2,9 +2,9 @@ type Submissions = Record<string, Record<string, string>>;
 type PlayerInfo = { name: string; online: boolean };
 type Identity = { name: string; token: string };
 type ServerMsg =
-  | { type: "state"; url: string; players: PlayerInfo[]; submissions: Submissions; total: number; locked: number[] }
-  | { type: "joined"; name: string; token: string; answers: Record<string, string>; total: number; locked: number[] }
-  | { type: "config"; total: number; locked: number[] }
+  | { type: "state"; url: string; players: PlayerInfo[]; submissions: Submissions; total: number; locked: number[]; texts: Record<string, string> }
+  | { type: "joined"; name: string; token: string; answers: Record<string, string>; total: number; locked: number[]; texts: Record<string, string> }
+  | { type: "config"; total: number; locked: number[]; texts: Record<string, string> }
   | { type: "submitted"; puzzle: number; answer: string }
   | { type: "rejected"; message: string }
   | { type: "error"; message: string };
@@ -33,6 +33,8 @@ const sent = new Map<string, string>(); // question number -> my saved answer
 let total = 0;
 let locked = new Set<number>();
 let selected = 1;
+let texts: Record<string, string> = {}; // host-written question text
+let savedTexts: Record<string, string> = {}; // host view: what the server has
 
 /* ---------- connection with auto-reconnect ---------- */
 let ws: WebSocket | undefined;
@@ -65,11 +67,11 @@ function handle(msg: ServerMsg) {
       saveIdentity(me);
       sent.clear();
       Object.entries(msg.answers).forEach(([p, a]) => sent.set(p, a));
-      applyConfig(msg.total, msg.locked);
+      applyConfig(msg.total, msg.locked, msg.texts);
       if (view !== "player") renderPlayer(); // on reconnect, leave what they're typing alone
       break;
     case "config":
-      applyConfig(msg.total, msg.locked);
+      applyConfig(msg.total, msg.locked, msg.texts);
       break;
     case "submitted":
       sent.set(String(msg.puzzle), msg.answer);
@@ -111,6 +113,7 @@ function renderPlayer() {
     <h1>Hi, ${esc(me!.name)}</h1>
     <p>Work it out on paper, then pick a question and send your answer.</p>
     <div id="chips" class="qchips"></div>
+    <div id="qtext" class="qtext" hidden></div>
     <form id="answer">
       <label><span id="qlabel"></span><input id="text" autocomplete="off" required></label>
       <button id="send">Send answer</button>
@@ -144,9 +147,10 @@ function select(n: number) {
   if (!locked.has(n)) $<HTMLInputElement>("text").focus();
 }
 
-function applyConfig(t: number, l: number[]) {
+function applyConfig(t: number, l: number[], tx: Record<string, string>) {
   total = t;
   locked = new Set(l);
+  texts = tx;
   if (view !== "player") return;
   if (selected > total) return select(total); // host lowered the question count
   renderChips();
@@ -168,6 +172,9 @@ const LOCK_NOTE = "This question is locked by the host.";
 function updateForm() {
   const isLocked = locked.has(selected);
   $("qlabel").textContent = `Question ${selected}`;
+  const qt = $("qtext");
+  qt.textContent = texts[String(selected)] ?? "";
+  qt.hidden = !qt.textContent;
   $<HTMLInputElement>("text").disabled = isLocked;
   $<HTMLButtonElement>("send").disabled = isLocked;
   if (isLocked) setStatus(LOCK_NOTE, true);
@@ -182,6 +189,16 @@ function setStatus(text: string, isError = false) {
 
 /* ---------- host ---------- */
 function renderHost(s: Extract<ServerMsg, { type: "state" }>) {
+  // Updates arrive constantly, so keep any unsaved question text (and cursor) across the redraw.
+  const drafts = new Map<string, string>();
+  app.querySelectorAll<HTMLTextAreaElement>("textarea[data-q]").forEach((t) => {
+    if (t.value !== (savedTexts[t.dataset.q!] ?? "")) drafts.set(t.dataset.q!, t.value);
+  });
+  const active = document.activeElement as HTMLTextAreaElement | null;
+  const focusQ = active?.dataset?.q;
+  const selStart = active?.selectionStart ?? 0;
+  const selEnd = active?.selectionEnd ?? 0;
+  savedTexts = s.texts;
   const online = s.players.filter((p) => p.online).length;
   const lockedSet = new Set(s.locked);
   let questions = "";
@@ -190,6 +207,8 @@ function renderHost(s: Extract<ServerMsg, { type: "state" }>) {
     questions += `<div class="puzzle">
       <div class="qhead"><strong>Question ${n}${lockedSet.has(n) ? " 🔒" : ""} <span class="muted">(${answers.length} answer${answers.length === 1 ? "" : "s"})</span></strong>
         <button class="quiet" data-lock="${n}" data-to="${!lockedSet.has(n)}">${lockedSet.has(n) ? "Unlock" : "Lock"}</button></div>
+      <textarea data-q="${n}" rows="2" aria-label="Text for question ${n}" placeholder="Question text players will see (optional)">${esc(s.texts[String(n)] ?? "")}</textarea>
+      <button class="quiet" data-save="${n}">Save text</button>
       <ul>${answers.map(([name, a]) => `<li>${esc(name)}: ${esc(a)}</li>`).join("")}</ul></div>`;
   }
   app.innerHTML = `
@@ -215,7 +234,20 @@ function renderHost(s: Extract<ServerMsg, { type: "state" }>) {
   app.querySelectorAll<HTMLButtonElement>("button[data-lock]").forEach((b) => {
     b.onclick = () => send({ type: "set_lock", puzzle: Number(b.dataset.lock), locked: b.dataset.to === "true" });
   });
+  app.querySelectorAll<HTMLButtonElement>("button[data-save]").forEach((b) => {
+    b.onclick = () => {
+      const q = b.dataset.save!;
+      const t = app.querySelector<HTMLTextAreaElement>(`textarea[data-q="${q}"]`)!;
+      send({ type: "set_text", puzzle: Number(q), text: t.value });
+    };
+  });
   $("clear").onclick = () => confirm("Clear all answers?") && send({ type: "clear" });
+  drafts.forEach((v, q) => (app.querySelector<HTMLTextAreaElement>(`textarea[data-q="${q}"]`)!.value = v));
+  if (focusQ) {
+    const t = app.querySelector<HTMLTextAreaElement>(`textarea[data-q="${focusQ}"]`);
+    t?.focus();
+    t?.setSelectionRange(selStart, selEnd);
+  }
 }
 
 /* ---------- start ---------- */

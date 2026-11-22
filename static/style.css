@@ -39,3 +39,7 @@ button.q.sel { background: var(--accent); color: var(--bg); border-color: var(--
 .stepper { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
 .qhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .qhead button { padding: 6px 12px; }
+.qtext { white-space: pre-wrap; border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; margin: 8px 0 16px; }
+textarea { width: 100%; font: inherit; padding: 10px 12px; margin: 8px 0; border-radius: 8px; border: 1px solid var(--line);
+  background: transparent; color: var(--ink); resize: vertical; }
+textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }

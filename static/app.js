@@ -26,6 +26,8 @@
   var total = 0;
   var locked = /* @__PURE__ */ new Set();
   var selected = 1;
+  var texts = {};
+  var savedTexts = {};
   var ws;
   var timer;
   var send = (obj) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(obj));
@@ -54,11 +56,11 @@
         saveIdentity(me);
         sent.clear();
         Object.entries(msg.answers).forEach(([p, a]) => sent.set(p, a));
-        applyConfig(msg.total, msg.locked);
+        applyConfig(msg.total, msg.locked, msg.texts);
         if (view !== "player") renderPlayer();
         break;
       case "config":
-        applyConfig(msg.total, msg.locked);
+        applyConfig(msg.total, msg.locked, msg.texts);
         break;
       case "submitted":
         sent.set(String(msg.puzzle), msg.answer);
@@ -97,6 +99,7 @@
     <h1>Hi, ${esc(me.name)}</h1>
     <p>Work it out on paper, then pick a question and send your answer.</p>
     <div id="chips" class="qchips"></div>
+    <div id="qtext" class="qtext" hidden></div>
     <form id="answer">
       <label><span id="qlabel"></span><input id="text" autocomplete="off" required></label>
       <button id="send">Send answer</button>
@@ -128,9 +131,10 @@
     updateForm();
     if (!locked.has(n)) $("text").focus();
   }
-  function applyConfig(t, l) {
+  function applyConfig(t, l, tx) {
     total = t;
     locked = new Set(l);
+    texts = tx;
     if (view !== "player") return;
     if (selected > total) return select(total);
     renderChips();
@@ -150,6 +154,9 @@
   function updateForm() {
     const isLocked = locked.has(selected);
     $("qlabel").textContent = `Question ${selected}`;
+    const qt = $("qtext");
+    qt.textContent = texts[String(selected)] ?? "";
+    qt.hidden = !qt.textContent;
     $("text").disabled = isLocked;
     $("send").disabled = isLocked;
     if (isLocked) setStatus(LOCK_NOTE, true);
@@ -161,6 +168,15 @@
     el.className = isError ? "err" : "ok";
   }
   function renderHost(s) {
+    const drafts = /* @__PURE__ */ new Map();
+    app.querySelectorAll("textarea[data-q]").forEach((t) => {
+      if (t.value !== (savedTexts[t.dataset.q] ?? "")) drafts.set(t.dataset.q, t.value);
+    });
+    const active = document.activeElement;
+    const focusQ = active?.dataset?.q;
+    const selStart = active?.selectionStart ?? 0;
+    const selEnd = active?.selectionEnd ?? 0;
+    savedTexts = s.texts;
     const online = s.players.filter((p) => p.online).length;
     const lockedSet = new Set(s.locked);
     let questions = "";
@@ -169,6 +185,8 @@
       questions += `<div class="puzzle">
       <div class="qhead"><strong>Question ${n}${lockedSet.has(n) ? " \u{1F512}" : ""} <span class="muted">(${answers.length} answer${answers.length === 1 ? "" : "s"})</span></strong>
         <button class="quiet" data-lock="${n}" data-to="${!lockedSet.has(n)}">${lockedSet.has(n) ? "Unlock" : "Lock"}</button></div>
+      <textarea data-q="${n}" rows="2" aria-label="Text for question ${n}" placeholder="Question text players will see (optional)">${esc(s.texts[String(n)] ?? "")}</textarea>
+      <button class="quiet" data-save="${n}">Save text</button>
       <ul>${answers.map(([name, a]) => `<li>${esc(name)}: ${esc(a)}</li>`).join("")}</ul></div>`;
     }
     app.innerHTML = `
@@ -194,7 +212,20 @@
     app.querySelectorAll("button[data-lock]").forEach((b) => {
       b.onclick = () => send({ type: "set_lock", puzzle: Number(b.dataset.lock), locked: b.dataset.to === "true" });
     });
+    app.querySelectorAll("button[data-save]").forEach((b) => {
+      b.onclick = () => {
+        const q = b.dataset.save;
+        const t = app.querySelector(`textarea[data-q="${q}"]`);
+        send({ type: "set_text", puzzle: Number(q), text: t.value });
+      };
+    });
     $("clear").onclick = () => confirm("Clear all answers?") && send({ type: "clear" });
+    drafts.forEach((v, q) => app.querySelector(`textarea[data-q="${q}"]`).value = v);
+    if (focusQ) {
+      const t = app.querySelector(`textarea[data-q="${focusQ}"]`);
+      t?.focus();
+      t?.setSelectionRange(selStart, selEnd);
+    }
   }
   if (!isHost) me ? app.innerHTML = "<p>Reconnecting\u2026</p>" : renderJoin();
   connect();

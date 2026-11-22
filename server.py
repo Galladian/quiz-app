@@ -34,7 +34,11 @@ JOIN_URL = f"http://{lan_ip()}:{PORT}/"
 players: dict[str, dict] = {}
 submissions: dict[str, dict[str, str]] = {}  # puzzle -> {name: answer}
 hosts: set[WebSocket] = set()
-config = {"total": 10, "locked": set()}  # host-controlled: question count + locked questions
+config = {"total": 10, "locked": set(), "texts": {}}  # host-controlled: count, locks, question text
+
+
+def texts() -> dict:
+    return {str(k): v for k, v in config["texts"].items()}
 
 
 def snapshot() -> dict:
@@ -48,11 +52,17 @@ def snapshot() -> dict:
         "submissions": submissions,
         "total": config["total"],
         "locked": sorted(config["locked"]),
+        "texts": texts(),
     }
 
 
 def config_msg() -> dict:
-    return {"type": "config", "total": config["total"], "locked": sorted(config["locked"])}
+    return {
+        "type": "config",
+        "total": config["total"],
+        "locked": sorted(config["locked"]),
+        "texts": texts(),
+    }
 
 
 async def push_config() -> None:
@@ -149,6 +159,7 @@ async def ws_endpoint(ws: WebSocket):
                         "answers": mine,
                         "total": config["total"],
                         "locked": sorted(config["locked"]),
+                        "texts": texts(),
                     }
                 )
                 await push_to_hosts()
@@ -194,6 +205,18 @@ async def ws_endpoint(ws: WebSocket):
                     config["locked"].add(n)
                 else:
                     config["locked"].discard(n)
+                await push_config()
+
+            elif kind == "set_text" and is_host:
+                try:
+                    n = int(msg.get("puzzle"))
+                except (TypeError, ValueError):
+                    continue
+                text = str(msg.get("text", "")).strip()[:1000]
+                if text:
+                    config["texts"][n] = text
+                else:
+                    config["texts"].pop(n, None)
                 await push_config()
 
             elif kind == "lock_all" and is_host:
